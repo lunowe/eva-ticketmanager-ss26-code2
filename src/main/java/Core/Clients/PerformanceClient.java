@@ -98,11 +98,10 @@ public class PerformanceClient {
     }
 
     private boolean isPrime(long number) {
-        if (number <= 1) return false;
-        for (long i = 2; i <= Math.sqrt(number); i++) {
-            if (number % i == 0) return false;
-        }
-        return true;
+        if (number < 2) return false;
+        if (number < 4) return true;
+        if ((number & 1L) == 0) return false;
+        return java.math.BigInteger.valueOf(number).isProbablePrime(30);
     }
 
     private void testConsecutive() {
