@@ -1,23 +1,27 @@
 package Core.Services;
 
-import Core.Models.Customer;
-import Core.Models.Event;
 import Core.Models.exceptions.CustomerException;
 import Core.Models.exceptions.EventException;
 import Core.Models.exceptions.TicketException;
 import Core.Interfaces.TicketServiceInterface;
-
 import java.time.LocalDate;
 import java.util.*;
+import Core.Models.Customer;
+import Core.Models.Event;
 import Core.Models.Ticket;
+import IDGenerator.IDService.IDService;
+import IDGenerator.IDService.IDServiceInterface;
 
 public class TicketService implements TicketServiceInterface {
 
-    private static final int MAX_TICKETS_PER_CUSTOMER_PER_EVENT = 5;
-
-    private final Map<UUID, Ticket> ticketsById = new HashMap<>();
+    private final Map<Long, Ticket> ticketsById = new HashMap<>();
     private CustomerService customerService;
     private EventService eventService;
+    private final IDServiceInterface idService;
+
+    public TicketService(IDServiceInterface idService){
+        this.idService = idService;
+    }
 
     public void setCustomerService(CustomerService customerService){
         this.customerService = customerService;
@@ -28,54 +32,20 @@ public class TicketService implements TicketServiceInterface {
     }
 
     @Override
-    public Ticket createTicket(UUID customerId, UUID eventId) throws TicketException, EventException, CustomerException {
-        // Verify the customer exists - throws CustomerException if not
-        Customer customer = customerService.getCustomerById(customerId);
-
-        // Verify the event exists - throws EventException if not
-        Event event = eventService.getEventById(eventId);
-
-        // The ticket can only be bought if there is contingent left
-        if (!event.hasAvailableTickets()) {
-            throw TicketException.noTicketsAvailable();
-        }
-
-        // A customer can buy at most 5 tickets per event
-        long ticketsAlreadyBoughtForEvent = ticketsById.values().stream()
-                .filter(t -> t.getCustomerId().equals(customerId)
-                        && t.getEventId().equals(eventId))
-                .count();
-        if (ticketsAlreadyBoughtForEvent >= MAX_TICKETS_PER_CUSTOMER_PER_EVENT) {
-            throw TicketException.maximumNumberOfTickets();
-        }
-
-        // Create the new ticket
-        Ticket ticket = new Ticket(
-                UUID.randomUUID(),
-                LocalDate.now(),
-                customerId,
-                eventId
-        );
-
-        validateTicket(ticket);
-
-        ticketsById.put(ticket.getId(), ticket);
-
-        // Assign ticket to event (decrements contingent + adds id to ticketsSold)
+    public Ticket createTicket(long customerId, long eventId) throws TicketException, EventException, CustomerException {
+        Ticket ticket = new Ticket(idService.getUnusedId(), LocalDate.now(), customerId, eventId);
+        saveTicket(ticket);
         eventService.ticketSoldForEvent(ticket);
-
-        // Assign ticket to customer (adds id to ticketsBought)
         customerService.addTicketToCustomer(ticket);
-
-        return ticket;
+        return getTicketById(ticket.getId());
     }
 
     @Override
-    public Ticket getTicketById(UUID id) throws TicketException {
-        if (id == null || !ticketsById.containsKey(id)) {
+    public Ticket getTicketById(long id) throws TicketException {
+        if(id <= 0 || !ticketsById.containsKey(id)){
             throw TicketException.ticketDoesNotExist();
         }
-        return ticketsById.get(id);
+            return clone(ticketsById.get(id));
     }
 
     @Override
@@ -84,57 +54,76 @@ public class TicketService implements TicketServiceInterface {
     }
 
     @Override
-    public void deleteTicket(UUID id) throws IllegalArgumentException {
-        if (id == null) {
+    public void deleteTicket(long id) throws IllegalArgumentException {
+        if (id <= 0 || !ticketsById.containsKey(id)) {
             throw new IllegalArgumentException("Ticket ID cannot be null");
         }
-
-        Ticket ticket = ticketsById.remove(id);
-        if (ticket == null) {
-            return;
-        }
-
-        // Remove ticket reference from the customer (might already be deleted)
-        try {
-            customerService.removeTicketFromCustomer(ticket);
-        } catch (CustomerException ignored) {
-            // Customer was already deleted - nothing more to do here
-        }
-
-        // Remove ticket reference from the event and free its contingent again
-        // (Event might already be deleted)
-        try {
-            eventService.deleteTicketSoldForEvent(ticket);
-        } catch (EventException ignored) {
-            // Event was already deleted - nothing more to do here
+        Ticket deletedTicket = ticketsById.remove(id);
+        if (deletedTicket != null) {
+            try {
+                eventService.deleteTicketSoldForEvent(deletedTicket);
+            } catch (EventException ignored){}
+            try {
+                customerService.removeTicketFromCustomer(deletedTicket);
+            } catch (CustomerException ignored){}
         }
     }
 
     @Override
     public void deleteAllTickets() {
+        for (Ticket ticket : ticketsById.values()) {
+            try {
+                eventService.deleteTicketSoldForEvent(ticket);
+            } catch (EventException ignored){}
+            try {
+                customerService.removeTicketFromCustomer(ticket);
+            } catch (CustomerException ignored){}
+        }
         ticketsById.clear();
     }
 
     private void validateTicket(Ticket ticket) throws TicketException, CustomerException, EventException {
-        if (ticket == null
-                || ticket.getId() == null
-                || ticket.getCustomerId() == null
-                || ticket.getEventId() == null
-                || ticket.getDateOfPurchase() == null) {
-            throw TicketException.ticketDoesNotExist();
+        customerService.getCustomerById(ticket.getCustomerId());
+        Event event = eventService.getEventById(ticket.getEventId());
+
+        if (!event.hasAvailableTickets()) {
+            throw TicketException.noTicketsAvailable();
         }
 
-        // The customer and the event have to exist
-        customerService.getCustomerById(ticket.getCustomerId());
-        eventService.getEventById(ticket.getEventId());
+        int ticketsBoughtForSameEvent = 0;
+        for(long eventTicket : event.getTicketsSold()){
+            if(getTicketById(eventTicket).getCustomerId() == ticket.getCustomerId()){
+                ticketsBoughtForSameEvent++;
+            }
+        }
+        if(ticketsBoughtForSameEvent >= 5){
+            throw TicketException.maximumNumberOfTickets();
+        }
+
     }
 
     @Override
-    public boolean verifyTicket(UUID id) {
-        if (id == null) {
-            return false;
-        }
-        return ticketsById.containsKey(id);
+    public boolean verifyTicket(long id) {
+        Ticket ticket = ticketsById.get(id);
+        if (ticket == null) return false;
+
+        Customer customer = customerService.getCustomerById(ticket.getCustomerId());
+        Event event = eventService.getEventById(ticket.getEventId());
+
+        return customer != null && event != null;
     }
 
+    private void saveTicket(Ticket ticket) throws TicketException {
+        validateTicket(ticket);
+        ticketsById.put(ticket.getId(), clone(ticket));
+    }
+
+    private Ticket clone(Ticket ticket){
+        return new Ticket(
+                ticket.getId(),
+                ticket.getDateOfPurchase(),
+                ticket.getCustomerId(),
+                ticket.getEventId()
+        );
+    }
 }
